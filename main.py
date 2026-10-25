@@ -11,19 +11,56 @@ import time
 import ollama
 import pythoncom
 from faster_whisper import WhisperModel
+import homeassistant
 
 class chatbot:
     def __init__(self):
-        self.conversation = [
-            {
-                "role": "system",
-                "content": "You are Gears. A helpful AI assistant and your sole goal is to help the user."
-            }
-        ]
         self.model = "qwen3-vl:2b"
         self.tts_queue = queue.Queue()
         self.tts_thread = threading.Thread(target=self.process_tts,daemon=True)
         self.tts_thread.start()
+
+        URL = "http://homeassistant.local/api"
+        TOKEN = "YOUR_LONG_LIVED_HOMEASSISTANT_TOKEN_HERE"
+        self.smarthome = homeassistant.SmartHome(URL,TOKEN)
+        self.thingys = {
+            #PUT YOUR HOMEASSISTANT THINGS AND NAMES HERE {"name": "id"}
+        }
+        self.conversation = [
+            {
+                "role": "system",
+                "content": "You are Gears. A helpful AI assistant integrated into a smart home. Use your tools when the user asks you to control devices."
+            }
+        ]
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "control_light",
+                    "description": "Turn a light on or off, with optional brightness.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "device_name": {
+                                "type": "string",
+                                "enum": list(self.thingys.keys()),
+                                "description": "The name of the light, e.g., 'bedroom lights'."
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["on", "off"],
+                                "description": "Whether to turn the light on or off."
+                            },
+                            "brightness": {
+                                "type": "integer",
+                                "description": "Brightness percentage from 1 to 100 (optional, defaults to 100 if turning on)."
+                            }
+                        },
+                        "required": ["device_name", "action"]
+                    }
+                }
+            }
+        ]
 
     def process_tts(self):
         pythoncom.CoInitialize()
@@ -47,28 +84,57 @@ class chatbot:
         resp = ollama.chat(
             model=self.model,
             messages=self.conversation,
-            stream=True
+            stream=False,
+            tools=self.tools
         )
-        full_response = ""
-        sentence_buffer = ""
+
+        message = resp.get('message', {})
         
-        for chunk in resp:
-            self.bot_busy = True
-            if 'message' in chunk and 'content' in chunk['message']:
-                token = chunk['message']['content']
-            else:
-                continue
-            print(token, end="", flush=True)  # Print word-by-word instantly to terminal
-            
-            full_response += token
-            sentence_buffer += token
-            
-            # Whenever a sentence ends, throw just that sentence into the voice queue
-            if any(punct in token for punct in [',', ';', ':', '.', '!', '?', '\n']):
-                dispatch_text = sentence_buffer.strip()
-                if dispatch_text:
-                    self.tts_queue.put(dispatch_text) # Safe handoff to the voice thread
-                sentence_buffer = "" # Reset buffer for the next sentence
+        # Check if Ollama wants to call a tool
+        if message.get('tool_calls'):
+            for tool in message['tool_calls']:
+                function_name = tool['function']['name']
+                arguments = tool['function']['arguments']
+                
+                if function_name == "control_light":
+                    device_name = arguments.get("device_name")
+                    action = arguments.get("action")
+                    brightness = arguments.get("brightness", 100)
+                    
+                    entity_id = self.thingys.get(device_name)
+                    
+                    if entity_id:
+                        if action == "on":
+                            self.smarthome.lightOn(entity_id, brightness)
+                            response_text = f"Turning on the {device_name}."
+                        else:
+                            self.smarthome.lightOff(entity_id)
+                            response_text = f"Turning off the {device_name}."
+                    else:
+                        response_text = f"I couldn't find a device named {device_name}."
+                    
+                    # Queue the response for TTS and output
+                    print(response_text)
+                    self.tts_queue.put(response_text)
+                    caption.broadcast_caption(response_text)
+                    
+                    # Add assistant action to conversation history
+                    self.conversation.append({
+                        "role": "assistant",
+                        "content": response_text
+                    })
+                    return
+        
+        # Fallback to standard text response if no tool was called
+        full_response = message.get('content', '')
+        print(full_response)
+        if full_response:
+            self.tts_queue.put(full_response)
+            caption.broadcast_caption(full_response)
+            self.conversation.append({
+                "role": "assistant",
+                "content": full_response
+            })
         
 class captions:
     def __init__(self):
