@@ -15,7 +15,7 @@ import homeassistant
 
 class chatbot:
     def __init__(self):
-        self.model = "qwen3-vl:2b"
+        self.model = "qwen3.5:0.8b"
         self.tts_queue = queue.Queue()
         self.tts_thread = threading.Thread(target=self.process_tts,daemon=True)
         self.tts_thread.start()
